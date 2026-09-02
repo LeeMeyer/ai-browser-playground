@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Local AI Agent + LiveCodes Playground</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="playground-pane">
+        <header class="pane-header">
+          <h1>LiveCodes + Local AI Agent</h1>
+          <p>Ask the agent to inspect or change the code in the embedded playground.</p>
+        </header>
+        <div id="playground"></div>
+      </section>
+
+      <aside class="chat-pane" aria-label="Agent chat">
+        <div class="chat-header">
+          <h2>Agent</h2>
+          <div class="model-controls">
+            <select id="provider" aria-label="AI provider">
+              <option value="transformers">Transformers.js</option>
+              <option value="chrome" selected>Chrome built-in AI</option>
+            </select>
+            <div id="model-field" class="model-field" hidden>
+              <select id="model-preset" aria-label="Transformers model preset">
+                <option value="Xenova/flan-t5-base" selected>Balanced: Xenova/flan-t5-base</option>
+                <option value="onnx-community/Qwen2.5-Coder-0.5B-Instruct">Code: Qwen2.5-Coder-0.5B-Instruct (0.5B)</option>
+                <option value="onnx-community/Qwen2.5-Coder-1.5B-Instruct">Code: Qwen2.5-Coder-1.5B-Instruct (1.5B)</option>
+                <option value="onnx-community/deepseek-coder-1.3b-instruct-ONNX">Code: DeepSeek-Coder Instruct ONNX (1.3B)</option>
+                <option value="onnx-community/Llama-3.1-8B-Instruct">Code: Llama-3.1-8B-Instruct (8B)</option>
+              </select>
+            </div>
+            <button id="init-ai" type="button">Initialize AI</button>
+          </div>
+        </div>
+
+        <div id="status" class="status">Transformers model not loaded.</div>
+        <div id="thinking" class="thinking" hidden>
+          <span class="spinner" aria-hidden="true"></span>
+          <span>Agent is thinking...</span>
+        </div>
+        <div id="messages" class="messages" aria-live="polite"></div>
+
+        <form id="chat-form" class="chat-form">
+          <textarea
+            id="prompt"
+            rows="4"
+            placeholder="Example: Make the button rounded and change text to 'Launch'."
+            disabled
+            required
+          ></textarea>
+          <button id="send" type="submit" disabled>Send</button>
+        </form>
+      </aside>
+    </main>
+
+    <script type="module" src="./app.js?v=20260902-4"></script>
+  </body>
+</html>
