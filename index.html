@@ -20,24 +20,11 @@
         <div class="chat-header">
           <h2>Agent</h2>
           <div class="model-controls">
-            <select id="provider" aria-label="AI provider">
-              <option value="transformers">Transformers.js</option>
-              <option value="chrome" selected>Chrome built-in AI</option>
-            </select>
-            <div id="model-field" class="model-field" hidden>
-              <select id="model-preset" aria-label="Transformers model preset">
-                <option value="Xenova/flan-t5-base" selected>Balanced: Xenova/flan-t5-base</option>
-                <option value="onnx-community/Qwen2.5-Coder-0.5B-Instruct">Code: Qwen2.5-Coder-0.5B-Instruct (0.5B)</option>
-                <option value="onnx-community/Qwen2.5-Coder-1.5B-Instruct">Code: Qwen2.5-Coder-1.5B-Instruct (1.5B)</option>
-                <option value="onnx-community/deepseek-coder-1.3b-instruct-ONNX">Code: DeepSeek-Coder Instruct ONNX (1.3B)</option>
-                <option value="onnx-community/Llama-3.1-8B-Instruct">Code: Llama-3.1-8B-Instruct (8B)</option>
-              </select>
-            </div>
             <button id="init-ai" type="button">Initialize AI</button>
           </div>
         </div>
 
-        <div id="status" class="status">Transformers model not loaded.</div>
+        <div id="status" class="status">Chrome built-in AI not initialized.</div>
         <div id="thinking" class="thinking" hidden>
           <span class="spinner" aria-hidden="true"></span>
           <span>Agent is thinking...</span>
@@ -57,6 +44,6 @@
       </aside>
     </main>
 
-    <script type="module" src="./app.js?v=20260902-4"></script>
+    <script type="module" src="./app.js?v=20260902-16"></script>
   </body>
 </html>
