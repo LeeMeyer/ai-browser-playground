@@ -1,33 +1,129 @@
 import { createPlayground } from "https://cdn.jsdelivr.net/npm/livecodes@0.14.1/+esm";
+import {
+  AutoProcessor,
+  env,
+  Gemma4ForConditionalGeneration,
+  TextStreamer,
+} from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.2.0/+esm";
+import * as prettier from "https://cdn.jsdelivr.net/npm/prettier@3.5.3/standalone.mjs";
+import * as prettierBabel from "https://cdn.jsdelivr.net/npm/prettier@3.5.3/plugins/babel.mjs";
+import * as prettierEstree from "https://cdn.jsdelivr.net/npm/prettier@3.5.3/plugins/estree.mjs";
+import * as prettierHtml from "https://cdn.jsdelivr.net/npm/prettier@3.5.3/plugins/html.mjs";
+import * as prettierPostcss from "https://cdn.jsdelivr.net/npm/prettier@3.5.3/plugins/postcss.mjs";
 
 const ui = {
   status: document.getElementById("status"),
+  modelLoad: document.getElementById("model-load"),
+  modelLoadFill: document.getElementById("model-load-fill"),
+  modelLoadText: document.getElementById("model-load-text"),
   thinking: document.getElementById("thinking"),
   messages: document.getElementById("messages"),
   form: document.getElementById("chat-form"),
   prompt: document.getElementById("prompt"),
   send: document.getElementById("send"),
   init: document.getElementById("init-ai"),
+  provider: document.getElementById("provider"),
+  modelField: document.getElementById("model-field"),
+  modelPreset: document.getElementById("model-preset"),
 };
 
 const state = {
+  provider: null,
+  generator: null,
   chromeSession: null,
+  modelId: null,
+  modelDevice: null,
   playground: null,
+  persistentCacheReady: false,
+  conversationTurns: [],
+  cacheSourceHint: "",
 };
 
+env.allowLocalModels = false;
+env.useBrowserCache = true;
+env.useWasmCache = true;
+
+const CACHE_PROBE_FILES = ["config.json", "tokenizer.json", "onnx/decoder_model_merged_q4f16.onnx_data"];
+const MODEL_INIT_TIMEOUT_MS = 90000;
+
+function buildHfResolveUrl(modelId, fileName) {
+  return `https://huggingface.co/${modelId}/resolve/main/${fileName}`;
+}
+
+async function detectModelCacheSource(modelId) {
+  if (typeof caches === "undefined") return "";
+
+  try {
+    const cache = await caches.open(env.cacheKey || "transformers-cache");
+    let hits = 0;
+
+    for (const fileName of CACHE_PROBE_FILES) {
+      const url = buildHfResolveUrl(modelId, fileName);
+      const match = await cache.match(url);
+      if (match) hits += 1;
+    }
+
+    if (hits === 0) return "from network";
+    if (hits === CACHE_PROBE_FILES.length) return "from cache";
+    return "cache + network";
+  } catch {
+    return "";
+  }
+}
+
+async function configureTransformersCache(modelId) {
+  env.useCustomCache = false;
+  env.customCache = null;
+  env.useBrowserCache = true;
+  env.useWasmCache = true;
+  state.persistentCacheReady = true;
+  state.cacheSourceHint = await detectModelCacheSource(modelId);
+}
+
+async function withTimeout(promise, timeoutMs, label) {
+  let timer = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(timeoutMs / 1000)}s`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+const MODEL_PRESETS = {
+  gemma4e2bitonnx: {
+    label: "Gemma 4 E2B IT (ONNX)",
+    modelId: "onnx-community/gemma-4-E2B-it-ONNX",
+  },
+  gemma4e4bitonnx: {
+    label: "Gemma 4 E4B IT (ONNX)",
+    modelId: "onnx-community/gemma-4-E4B-it-ONNX",
+  },
+};
+
+const TRANSFORMERS_MAX_PROMPT_CHARS = 2500;
+const TRANSFORMERS_RETRY_PROMPT_CHARS = 1200;
+const TRANSFORMERS_MAX_NEW_TOKENS = 700;
+const TRANSFORMERS_RETRY_MAX_NEW_TOKENS = 350;
+const MAX_CONVERSATION_TURNS = 8;
+
 const PLAN_SHAPE_TEXT =
-  '{"action":"read|write|answer","target":"html|css|js|all","summary":"string","content":"string","code":{"html":"string","css":"string","js":"string"}}';
+  '{"action":"read|write|answer","target":"html|css|js|all","summary":"string","information":"string","changes":{"html":"string","css":"string","js":"string"}}';
 
 const PLAN_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["action", "target", "summary", "content", "code"],
+  required: ["action", "target", "summary", "information", "changes"],
   properties: {
     action: { type: "string", enum: ["read", "write", "answer"] },
     target: { type: "string", enum: ["html", "css", "js", "all"] },
     summary: { type: "string" },
-    content: { type: "string" },
-    code: {
+    information: { type: "string" },
+    changes: {
       type: "object",
       additionalProperties: false,
       required: ["html", "css", "js"],
@@ -44,23 +140,72 @@ function setStatus(text) {
   ui.status.textContent = text;
 }
 
+function setModelLoading(visible, text = "", percent = null) {
+  if (!ui.modelLoad) return;
+
+  ui.modelLoad.hidden = !visible;
+  if (ui.modelLoadText) {
+    ui.modelLoadText.textContent = text;
+  }
+
+  if (ui.modelLoadFill) {
+    ui.modelLoadFill.style.width = Number.isFinite(percent) ? `${Math.max(0, Math.min(100, percent))}%` : "0%";
+  }
+}
+
+function updateModelLoading(progress) {
+  if (!ui.modelLoad) return;
+
+  let percent = null;
+  if (typeof progress?.progress === "number") {
+    percent = progress.progress <= 1 ? progress.progress * 100 : progress.progress;
+  } else if (typeof progress?.loaded === "number" && typeof progress?.total === "number" && progress.total > 0) {
+    percent = (progress.loaded / progress.total) * 100;
+  }
+
+  const parts = [];
+  if (progress?.status) parts.push(String(progress.status));
+  if (progress?.file) parts.push(String(progress.file).split("/").pop());
+  if (Number.isFinite(percent)) parts.push(`${Math.round(percent)}%`);
+  const sourceLabel = state.cacheSourceHint;
+  if (sourceLabel) parts.push(sourceLabel);
+
+  setModelLoading(true, parts.join(" • ") || "Loading model...", percent);
+}
+
 function setThinking(isThinking) {
   ui.thinking.hidden = !isThinking;
   ui.send.textContent = isThinking ? "Thinking..." : "Send";
 }
 
-function isReady() {
-  return !!state.chromeSession;
+function getSelectedProvider() {
+  return ui.provider?.value === "transformers" ? "transformers" : "chrome";
+}
+
+function getProviderLabel(provider) {
+  return provider === "transformers" ? "Transformers.js" : "Chrome built-in AI";
+}
+
+function isReady(provider = getSelectedProvider()) {
+  if (provider === "transformers") return state.provider === "transformers" && !!state.generator;
+  return state.provider === "chrome" && !!state.chromeSession;
 }
 
 function syncReadyUi() {
-  const ready = isReady();
+  const ready = isReady(getSelectedProvider());
   ui.prompt.disabled = !ready;
   ui.send.disabled = !ready;
 }
 
 function syncInitButtonUi() {
-  ui.init.hidden = isReady();
+  ui.init.hidden = isReady(getSelectedProvider());
+}
+
+function syncProviderUi() {
+  const isTransformers = getSelectedProvider() === "transformers";
+  if (ui.modelField) {
+    ui.modelField.hidden = !isTransformers;
+  }
 }
 
 function scrollMessagesToBottom() {
@@ -78,6 +223,39 @@ function addMessage(role, text) {
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function formatJsCode(code) {
+  try {
+    return await prettier.format(code, {
+      parser: "babel",
+      plugins: [prettierBabel, prettierEstree],
+    });
+  } catch {
+    return code;
+  }
+}
+
+async function formatCssCode(code) {
+  try {
+    return await prettier.format(code, {
+      parser: "css",
+      plugins: [prettierPostcss],
+    });
+  } catch {
+    return code;
+  }
+}
+
+async function formatHtmlCode(code) {
+  try {
+    return await prettier.format(code, {
+      parser: "html",
+      plugins: [prettierHtml],
+    });
+  } catch {
+    return code;
+  }
 }
 
 async function addAgentMessage(text) {
@@ -106,6 +284,53 @@ async function addAgentMessage(text) {
 function truncate(text, max = 1500) {
   if (text.length <= max) return text;
   return `${text.slice(0, max)}\n\n...truncated...`;
+}
+
+function truncateForModel(text, maxChars) {
+  const value = typeof text === "string" ? text.trim() : "";
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, maxChars)}\n/* truncated for model context */`;
+}
+
+function rememberConversationTurn(userText, assistantText) {
+  const user = typeof userText === "string" ? userText.trim() : "";
+  const assistant = typeof assistantText === "string" ? assistantText.trim() : "";
+  if (!user && !assistant) return;
+
+  state.conversationTurns.push({ user, assistant });
+  if (state.conversationTurns.length > MAX_CONVERSATION_TURNS) {
+    state.conversationTurns.splice(0, state.conversationTurns.length - MAX_CONVERSATION_TURNS);
+  }
+}
+
+function getConversationContextText() {
+  if (!Array.isArray(state.conversationTurns) || state.conversationTurns.length === 0) return "";
+
+  return state.conversationTurns
+    .map((turn, index) => {
+      const user = truncateForModel(turn.user || "", 180).replace(/\n/g, " ");
+      const assistant = truncateForModel(turn.assistant || "", 220).replace(/\n/g, " ");
+      return `${index + 1}. User: ${user || "(empty)"}\n   Agent: ${assistant || "(empty)"}`;
+    })
+    .join("\n");
+}
+
+function isWebGpuOutOfMemoryError(error) {
+  const message = String(error?.message || error || "").toLowerCase();
+  return (
+    message.includes("e_outofmemory") ||
+    message.includes("outofmemory") ||
+    message.includes("failed to create a webgpu compute pipeline") ||
+    message.includes("failed to call ortrun")
+  );
+}
+
+function getModelCodeContext(current, maxChars = TRANSFORMERS_MAX_PROMPT_CHARS) {
+  return {
+    html: truncateForModel(current.html, maxChars),
+    css: truncateForModel(current.css, maxChars),
+    js: truncateForModel(current.js, maxChars),
+  };
 }
 
 function extractBalancedJson(text) {
@@ -143,13 +368,13 @@ function normalizePlan(plan) {
   if (!plan || typeof plan !== "object") return null;
   const action = typeof plan.action === "string" ? plan.action.toLowerCase() : "answer";
   const target = typeof plan.target === "string" ? plan.target.toLowerCase() : "all";
-  const content = typeof plan.content === "string" ? plan.content : "";
   const summary = typeof plan.summary === "string" ? plan.summary : "";
-  const rawCode = plan.code && typeof plan.code === "object" ? plan.code : {};
-  const code = {
-    html: typeof rawCode.html === "string" ? rawCode.html : "",
-    css: typeof rawCode.css === "string" ? rawCode.css : "",
-    js: typeof rawCode.js === "string" ? rawCode.js : "",
+  const information = typeof plan.information === "string" ? plan.information : "";
+  const rawChanges = plan.changes && typeof plan.changes === "object" ? plan.changes : {};
+  const changes = {
+    html: typeof rawChanges.html === "string" ? rawChanges.html : "",
+    css: typeof rawChanges.css === "string" ? rawChanges.css : "",
+    js: typeof rawChanges.js === "string" ? rawChanges.js : "",
   };
 
   const allowedActions = new Set(["read", "write", "answer"]);
@@ -157,26 +382,10 @@ function normalizePlan(plan) {
   return {
     action: allowedActions.has(action) ? action : "answer",
     target: allowedTargets.has(target) ? target : "all",
-    content,
     summary,
-    code,
+    information,
+    changes,
   };
-}
-
-function hasWritePayload(plan) {
-  if (!plan || plan.action !== "write") return false;
-  if (plan.target === "all") {
-    return (
-      (typeof plan.content === "string" && plan.content.trim().length > 0) ||
-      typeof plan.code?.html === "string" ||
-      typeof plan.code?.css === "string" ||
-      typeof plan.code?.js === "string"
-    );
-  }
-  return (
-    (typeof plan.content === "string" && plan.content.trim().length > 0) ||
-    (typeof plan.code?.[plan.target] === "string" && plan.code[plan.target].trim().length > 0)
-  );
 }
 
 function isLikelyCodeSnippet(target, value) {
@@ -189,55 +398,33 @@ function isLikelyCodeSnippet(target, value) {
   return false;
 }
 
+function normalizeEscapedCodeText(value) {
+  if (typeof value !== "string") return "";
+
+  // Some model responses include literal escape sequences (e.g. "\\n") inside JSON fields.
+  // Convert them to real newlines/tabs so LiveCodes receives valid source text.
+  if (!value.includes("\\n") && !value.includes("\\r\\n") && !value.includes("\\t")) {
+    return value;
+  }
+
+  return value.replace(/\\r\\n/g, "\n").replace(/\\n/g, "\n").replace(/\\t/g, "\t");
+}
+
 function getWritePayload(plan) {
-  if (!plan || plan.action !== "write") return { target: null, content: "", codeObject: null };
+  if (!plan || plan.action !== "write") return null;
 
-  if (plan.target === "all") {
-    let candidate = {
-      html: typeof plan.code?.html === "string" ? plan.code.html : "",
-      css: typeof plan.code?.css === "string" ? plan.code.css : "",
-      js: typeof plan.code?.js === "string" ? plan.code.js : "",
-    };
+  const changes = {
+    html: normalizeEscapedCodeText(typeof plan.changes?.html === "string" ? plan.changes.html : ""),
+    css: normalizeEscapedCodeText(typeof plan.changes?.css === "string" ? plan.changes.css : ""),
+    js: normalizeEscapedCodeText(typeof plan.changes?.js === "string" ? plan.changes.js : ""),
+  };
 
-    // Fallback: some model variants return the full { html, css, js } object inside content.
-    if (
-      !isLikelyCodeSnippet("html", candidate.html) &&
-      !isLikelyCodeSnippet("css", candidate.css) &&
-      !isLikelyCodeSnippet("js", candidate.js)
-    ) {
-      try {
-        const parsed = JSON.parse(plan.content || "");
-        candidate = {
-          html: typeof parsed?.html === "string" ? parsed.html : "",
-          css: typeof parsed?.css === "string" ? parsed.css : "",
-          js: typeof parsed?.js === "string" ? parsed.js : "",
-        };
-      } catch {
-        // Ignore parse failures and keep evaluating existing candidate fields.
-      }
-    }
+  const applied = {};
+  if (isLikelyCodeSnippet("html", changes.html)) applied.html = changes.html;
+  if (isLikelyCodeSnippet("css", changes.css)) applied.css = changes.css;
+  if (isLikelyCodeSnippet("js", changes.js)) applied.js = changes.js;
 
-    const hasAnyCode =
-      isLikelyCodeSnippet("html", candidate.html) ||
-      isLikelyCodeSnippet("css", candidate.css) ||
-      isLikelyCodeSnippet("js", candidate.js);
-    return hasAnyCode
-      ? { target: "all", content: "", codeObject: candidate }
-      : { target: null, content: "", codeObject: null };
-  }
-
-  const contentCandidate = typeof plan.content === "string" ? plan.content : "";
-  const codeCandidate = typeof plan.code?.[plan.target] === "string" ? plan.code[plan.target] : "";
-
-  if (isLikelyCodeSnippet(plan.target, contentCandidate)) {
-    return { target: plan.target, content: contentCandidate, codeObject: plan.code };
-  }
-
-  if (isLikelyCodeSnippet(plan.target, codeCandidate)) {
-    return { target: plan.target, content: codeCandidate, codeObject: plan.code };
-  }
-
-  return { target: null, content: "", codeObject: null };
+  return Object.keys(applied).length > 0 ? applied : null;
 }
 
 function getCodeStats(text) {
@@ -378,9 +565,10 @@ function listChangedTargets(before, after) {
 }
 
 function formatReadMessage(target, code) {
+  const providerLabel = getProviderLabel(state.provider);
   if (target === "all") {
     return [
-      "Read current playground code (provider: Chrome built-in AI).",
+      `Read current playground code (provider: ${providerLabel}).`,
       "",
       formatStatsLine("HTML", code.html),
       formatStatsLine("CSS", code.css),
@@ -394,7 +582,7 @@ function formatReadMessage(target, code) {
 
   const key = target === "html" ? "html" : target === "css" ? "css" : "js";
   return [
-    `Read ${target.toUpperCase()} from the playground (provider: Chrome built-in AI).`,
+    `Read ${target.toUpperCase()} from the playground (provider: ${providerLabel}).`,
     "",
     formatStatsLine(target.toUpperCase(), code[key] || ""),
     "",
@@ -402,10 +590,11 @@ function formatReadMessage(target, code) {
   ].join("\n");
 }
 
-function formatWriteMessage(target, before, after) {
+function formatWriteMessage(before, after) {
+  const providerLabel = getProviderLabel(state.provider);
   const changed = listChangedTargets(before, after);
   if (changed.length === 0) {
-    return `Write action completed for ${target.toUpperCase()}, but no code differences were detected.`;
+    return "Write action completed, but no code differences were detected.";
   }
 
   const sections = [];
@@ -420,7 +609,7 @@ function formatWriteMessage(target, before, after) {
   }
 
   return [
-    "Applied write action using Chrome built-in AI and re-ran the playground.",
+    `Applied write action using ${providerLabel} and re-ran the playground.`,
     `Updated targets: ${changed.join(", ")}.`,
     "",
     ...sections,
@@ -430,11 +619,34 @@ function formatWriteMessage(target, before, after) {
 }
 
 async function initPlayground() {
+  const initialHtml = await formatHtmlCode(`
+<main>
+  <h1>Hello from LiveCodes</h1>
+  <button id="cta">Click me</button>
+</main>
+`);
+  const initialCss = await formatCssCode(`
+body {
+  font-family: system-ui;
+  padding: 2rem;
+}
+
+#cta {
+  padding: 0.6rem 1rem;
+  border: 0;
+  background: #1f7a5a;
+  color: #fff;
+}
+`);
+  const initialJs = await formatJsCode(`
+document.getElementById('cta').addEventListener('click', () => console.log('clicked'));
+`);
+
   state.playground = await createPlayground("#playground", {
     params: {
-      html: "<main><h1>Hello from LiveCodes</h1><button id='cta'>Click me</button></main>",
-      css: "body{font-family:system-ui;padding:2rem;}#cta{padding:0.6rem 1rem;border:0;background:#1f7a5a;color:#fff;}",
-      js: "document.getElementById('cta').addEventListener('click', () => console.log('clicked'));",
+      html: initialHtml,
+      css: initialCss,
+      js: initialJs,
       console: "open",
     },
     loading: "eager",
@@ -467,15 +679,84 @@ async function initChromeAi() {
         content:
           "You are an agent that controls a coding playground. Return valid JSON only with schema " +
           PLAN_SHAPE_TEXT +
-          ". For target=all and action=write, put full updated code in code.html/code.css/code.js and keep content empty.",
+          ". For action=write, place complete updated source in changes.html/changes.css/changes.js for any files you want to modify and leave unchanged ones empty.",
       },
     ],
   });
 
+  state.provider = "chrome";
+  state.generator = null;
+  state.modelId = null;
+  state.modelDevice = null;
+  state.conversationTurns = [];
+
   setStatus("Chrome built-in AI ready.");
+  syncReadyUi();
+  syncInitButtonUi();
+}
+
+async function initTransformersAi() {
+  const preset = MODEL_PRESETS[ui.modelPreset.value] || MODEL_PRESETS.gemma4e2bitonnx;
+  const modelDevice = navigator.gpu ? "webgpu" : "wasm";
+
+  state.cacheSourceHint = "";
+  await configureTransformersCache(preset.modelId);
+
+  if (!navigator.gpu) {
+    setStatus("WebGPU unavailable. Loading Transformers.js with CPU/WASM fallback...");
+  }
+
+  const sourceLabel = state.cacheSourceHint;
+  setStatus(`Loading Transformers.js model: ${preset.modelId}${sourceLabel ? ` (${sourceLabel})` : ""}`);
+  setModelLoading(true, sourceLabel ? `Starting model load (${sourceLabel})...` : "Starting model load...", 0);
+
+  try {
+    const [processor, model] = await withTimeout(
+      Promise.all([
+        AutoProcessor.from_pretrained(preset.modelId, {
+          progress_callback: updateModelLoading,
+        }),
+        Gemma4ForConditionalGeneration.from_pretrained(preset.modelId, {
+          dtype: "q4f16",
+          device: modelDevice,
+          progress_callback: updateModelLoading,
+        }),
+      ]),
+      MODEL_INIT_TIMEOUT_MS,
+      "Transformers model initialization"
+    );
+
+    state.generator = { processor, model };
+    state.chromeSession = null;
+    state.provider = "transformers";
+    state.modelId = preset.modelId;
+    state.modelDevice = modelDevice;
+    state.conversationTurns = [];
+
+    setModelLoading(false);
+    setStatus(
+      `Transformers.js ready: ${preset.modelId} (${modelDevice.toUpperCase()})${
+        sourceLabel ? `, loaded ${sourceLabel}` : ""
+      }`
+    );
+    syncReadyUi();
+    syncInitButtonUi();
+  } catch (error) {
+    state.generator = null;
+    state.modelId = null;
+    state.modelDevice = null;
+    state.provider = null;
+    setModelLoading(false);
+    const message = String(error?.message || error || "unknown error");
+    syncReadyUi();
+    syncInitButtonUi();
+    throw new Error(`Unable to load ${preset.label} in Transformers.js: ${message}`);
+  }
 }
 
 function buildPlannerPrompt(input, current) {
+  const context = state.provider === "transformers" ? getModelCodeContext(current) : current;
+  const conversationContext = getConversationContextText();
   return [
     "You are an agent that controls a coding playground.",
     "Return only valid JSON. Do not include markdown.",
@@ -484,51 +765,26 @@ function buildPlannerPrompt(input, current) {
     "Rules:",
     "- Use action=read when the user asks to inspect, show, or explain existing code.",
     "- Use action=write when the user asks to modify code.",
-    "- For action=write and target=all, fill code.html, code.css, code.js with complete updated code.",
-    "- For action=write and single target, use content only for that target and keep code fields empty strings.",
-    "- For action=read or answer, keep content and all code fields empty strings.",
+    "- Use action=answer for questions or guidance that should not change code.",
+    "- Always populate information with your direct natural-language response to the user.",
+    "- For action=write, put complete updated source for each changed file in changes.html, changes.css, or changes.js.",
+    "- For files that should remain unchanged, set that changes field to an empty string.",
+    "- Every non-empty changes field must be different from the current code for that file.",
+    "- For action=read or answer, set all changes fields to empty strings.",
+    "- Do not describe code edits without providing code in the relevant changes fields.",
     "- Output must start with { and end with }.",
     "",
     `User request: ${input}`,
+    conversationContext ? "" : null,
+    conversationContext ? `Recent conversation:\n${conversationContext}` : null,
     "",
     "Current code context:",
-    `HTML:\n${current.html}`,
-    `CSS:\n${current.css}`,
-    `JS:\n${current.js}`,
-  ].join("\n");
-}
-
-function buildJsonRepairPrompt(raw) {
-  return [
-    "Convert the following text to strict JSON using this exact schema:",
-    PLAN_SHAPE_TEXT,
-    "Return only JSON and nothing else.",
-    "",
-    "TEXT:",
-    raw,
-  ].join("\n");
-}
-
-function buildWriteRepairPrompt(input, current, priorRaw) {
-  return [
-    "The previous response indicated a write action but did not include actual updated code.",
-    "Return valid JSON only with this schema:",
-    PLAN_SHAPE_TEXT,
-    "You must include updated code now:",
-    "- If target is all: fill code.html, code.css, code.js with complete updated code.",
-    "- If target is html/css/js: put full updated code for that target in content.",
-    "- Do not leave write payload empty.",
-    "",
-    `User request: ${input}`,
-    "",
-    "Current code context:",
-    `HTML:\n${current.html}`,
-    `CSS:\n${current.css}`,
-    `JS:\n${current.js}`,
-    "",
-    "Previous invalid/insufficient model output:",
-    priorRaw,
-  ].join("\n");
+    `HTML:\n${context.html}`,
+    `CSS:\n${context.css}`,
+    `JS:\n${context.js}`,
+  ]
+    .filter((line) => line !== null)
+    .join("\n");
 }
 
 async function promptChrome(promptText, useConstraint = false) {
@@ -544,19 +800,59 @@ async function promptChrome(promptText, useConstraint = false) {
   }
 }
 
+async function promptTransformers(promptText) {
+  const runtime = state.generator;
+  if (!runtime?.processor || !runtime?.model) {
+    throw new Error("Transformers.js model is not initialized.");
+  }
+
+  const runPrompt = async (text, maxNewTokens) => {
+    const messages = [{ role: "user", content: [{ type: "text", text }] }];
+    const prompt = runtime.processor.apply_chat_template(messages, {
+      enable_thinking: false,
+      add_generation_prompt: true,
+    });
+    const inputs = await runtime.processor(prompt);
+
+    let generatedText = "";
+    const streamer = new TextStreamer(runtime.processor.tokenizer, {
+      skip_prompt: true,
+      callback_function: (token) => {
+        generatedText += token;
+      },
+    });
+
+    await runtime.model.generate({
+      ...inputs,
+      max_new_tokens: maxNewTokens,
+      do_sample: false,
+      streamer,
+    });
+
+    return generatedText.trim();
+  };
+
+  try {
+    return await runPrompt(promptText, TRANSFORMERS_MAX_NEW_TOKENS);
+  } catch (error) {
+    if (!isWebGpuOutOfMemoryError(error)) throw error;
+
+    setStatus("WebGPU ran out of memory. Retrying with a smaller prompt...");
+    const retryPrompt = truncateForModel(promptText, TRANSFORMERS_RETRY_PROMPT_CHARS);
+    return runPrompt(retryPrompt, TRANSFORMERS_RETRY_MAX_NEW_TOKENS);
+  }
+}
+
+async function promptActiveProvider(promptText, useConstraint = false) {
+  if (state.provider === "transformers") {
+    return promptTransformers(promptText);
+  }
+  return promptChrome(promptText, useConstraint);
+}
+
 async function getPlanFromChrome(input, current) {
   const plannerPrompt = buildPlannerPrompt(input, current);
-  const raw = await promptChrome(plannerPrompt, true);
-  return { raw, plan: normalizePlan(extractJson(raw)) };
-}
-
-async function repairPlan(rawText) {
-  const raw = await promptChrome(buildJsonRepairPrompt(rawText), true);
-  return { raw, plan: normalizePlan(extractJson(raw)) };
-}
-
-async function requestConcreteWritePlan(input, current, priorRaw) {
-  const raw = await promptChrome(buildWriteRepairPrompt(input, current, priorRaw), true);
+  const raw = await promptActiveProvider(plannerPrompt, true);
   return { raw, plan: normalizePlan(extractJson(raw)) };
 }
 
@@ -569,37 +865,46 @@ async function getCurrentCode() {
   };
 }
 
-async function applyCodeUpdate(target, content, codeObject) {
+async function setPlaygroundCode(next) {
+  await state.playground.setConfig({
+    markup: {
+      language: "html",
+      content: next.html,
+    },
+    style: {
+      language: "css",
+      content: next.css,
+    },
+    script: {
+      language: "javascript",
+      content: next.js,
+    },
+  });
+
+  await state.playground.run();
+}
+
+async function applyCodeUpdate(changes) {
   const current = await getCurrentCode();
   const next = { ...current };
 
-  if (target === "html") next.html = content;
-  if (target === "css") next.css = content;
-  if (target === "js") next.js = content;
+  if (typeof changes?.html === "string") next.html = changes.html;
+  if (typeof changes?.css === "string") next.css = changes.css;
+  if (typeof changes?.js === "string") next.js = changes.js;
 
-  if (target === "all") {
-    try {
-      const parsed = codeObject && typeof codeObject === "object" ? codeObject : JSON.parse(content);
-      next.html = typeof parsed.html === "string" ? parsed.html : next.html;
-      next.css = typeof parsed.css === "string" ? parsed.css : next.css;
-      next.js = typeof parsed.js === "string" ? parsed.js : next.js;
-    } catch {
-      throw new Error("Expected JSON content for target=all.");
-    }
-  }
+  next.html = await formatHtmlCode(next.html);
+  next.css = await formatCssCode(next.css);
+  next.js = await formatJsCode(next.js);
 
-  await state.playground.setConfig({
-    markup: { content: next.html },
-    style: { content: next.css },
-    script: { content: next.js },
-  });
-  await state.playground.run();
-  return { before: current, after: next };
+  await setPlaygroundCode(next);
+
+  const applied = await getCurrentCode();
+  return { before: current, after: applied };
 }
 
 async function handleUserPrompt(input) {
-  if (!isReady()) {
-    await addAgentMessage("Initialize Chrome built-in AI before sending a message.");
+  if (!isReady(getSelectedProvider())) {
+    await addAgentMessage(`Initialize ${getProviderLabel(getSelectedProvider())} before sending a message.`);
     return;
   }
 
@@ -610,59 +915,83 @@ async function handleUserPrompt(input) {
   let plan = firstAttempt.plan;
 
   if (!plan) {
-    const repaired = await repairPlan(raw);
-    raw = repaired.raw;
-    plan = repaired.plan;
-  }
-
-  if (plan && plan.action === "write" && !hasWritePayload(plan)) {
-    const writeRepair = await requestConcreteWritePlan(input, current, raw);
-    raw = writeRepair.raw;
-    plan = writeRepair.plan || plan;
-  }
-
-  if (!plan) {
-    await addAgentMessage("Model response was not valid JSON after retries. No code was changed.");
-    await addAgentMessage(truncate(raw));
+    await addAgentMessage("Model response was not valid JSON. No code was changed.");
+    rememberConversationTurn(input, "Response parse failed; no code changes applied.");
     return;
   }
 
   if (plan.action === "read") {
-    await addAgentMessage(formatReadMessage(plan.target, current));
+    const readMsg = formatReadMessage(plan.target, current);
+    await addAgentMessage(readMsg);
+    if (plan.information && plan.information.trim()) {
+      await addAgentMessage(plan.information.trim());
+    }
+    rememberConversationTurn(input, plan.information || `Read action completed (${plan.target}).`);
     return;
   }
 
   if (plan.action === "write") {
     const payload = getWritePayload(plan);
-    if (!payload.target) {
+    if (!payload) {
       await addAgentMessage(
         "Write action was detected, but the returned payload did not look like code. No code was changed."
       );
+      if (plan.information && plan.information.trim()) {
+        await addAgentMessage(plan.information.trim());
+      }
+      rememberConversationTurn(input, plan.information || "Write action rejected because payload did not contain code.");
       return;
     }
 
     try {
-      const result = await applyCodeUpdate(payload.target, payload.content || "", payload.codeObject);
-      await addAgentMessage(formatWriteMessage(payload.target, result.before, result.after));
+      const result = await applyCodeUpdate(payload);
+      const writeMsg = formatWriteMessage(result.before, result.after);
+      await addAgentMessage(writeMsg);
+      if (plan.information && plan.information.trim()) {
+        await addAgentMessage(plan.information.trim());
+      }
+      rememberConversationTurn(input, plan.summary || plan.information || "Write action applied.");
     } catch (error) {
       await addAgentMessage(`Failed to apply code update: ${error.message}`);
+      rememberConversationTurn(input, `Write action failed: ${error.message}`);
     }
     return;
   }
 
-  await addAgentMessage("No code change was applied. The model returned an informational answer.");
+  const info =
+    (typeof plan.information === "string" && plan.information.trim()) ||
+    (typeof plan.summary === "string" && plan.summary.trim()) ||
+    "No code change was applied.";
+  await addAgentMessage(info);
+  rememberConversationTurn(input, info);
 }
 
 ui.init.addEventListener("click", async () => {
   ui.init.disabled = true;
   try {
-    await initChromeAi();
+    const provider = getSelectedProvider();
+    if (provider === "transformers") {
+      await initTransformersAi();
+    } else {
+      await initChromeAi();
+    }
   } catch (error) {
     setStatus(`AI init failed: ${error.message}`);
   } finally {
     ui.init.disabled = false;
     syncReadyUi();
     syncInitButtonUi();
+  }
+});
+
+ui.provider?.addEventListener("change", () => {
+  syncProviderUi();
+  syncReadyUi();
+  syncInitButtonUi();
+
+  const provider = getSelectedProvider();
+  if (!isReady(provider)) {
+    setStatus(`Selected provider: ${getProviderLabel(provider)}. Click Initialize AI.`);
   }
 });
 
@@ -687,10 +1016,24 @@ ui.form.addEventListener("submit", async (event) => {
   }
 });
 
+ui.prompt?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    if (!ui.send.disabled) {
+      ui.form.requestSubmit();
+    }
+  }
+});
+
 initPlayground().catch((error) => {
   setStatus(`Failed to initialize LiveCodes: ${error.message}`);
 });
 
+if (navigator.storage?.persist) {
+  navigator.storage.persist().catch(() => {});
+}
+
 syncReadyUi();
 syncInitButtonUi();
-setStatus("Chrome built-in AI not initialized. Click Initialize AI.");
+syncProviderUi();
+setStatus("Selected provider: Chrome built-in AI. Click Initialize AI.");

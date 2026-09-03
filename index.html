@@ -20,11 +20,27 @@
         <div class="chat-header">
           <h2>Agent</h2>
           <div class="model-controls">
+            <select id="provider" aria-label="AI provider">
+              <option value="chrome" selected>Chrome built-in AI</option>
+              <option value="transformers">Transformers.js</option>
+            </select>
+            <div id="model-field" class="model-field" hidden>
+              <select id="model-preset" aria-label="Model preset">
+                <option value="gemma4e2bitonnx" selected>Gemma 4 E2B IT (ONNX)</option>
+                <option value="gemma4e4bitonnx">Gemma 4 E4B IT (ONNX)</option>
+              </select>
+            </div>
             <button id="init-ai" type="button">Initialize AI</button>
           </div>
         </div>
 
         <div id="status" class="status">Chrome built-in AI not initialized.</div>
+        <div id="model-load" class="model-load" hidden>
+          <div class="model-load-bar" aria-hidden="true">
+            <div id="model-load-fill" class="model-load-fill"></div>
+          </div>
+          <div id="model-load-text" class="model-load-text">Loading model...</div>
+        </div>
         <div id="thinking" class="thinking" hidden>
           <span class="spinner" aria-hidden="true"></span>
           <span>Agent is thinking...</span>
@@ -44,6 +60,6 @@
       </aside>
     </main>
 
-    <script type="module" src="./app.js?v=20260902-16"></script>
+    <script type="module" src="./app.js?v=20260903-34"></script>
   </body>
 </html>

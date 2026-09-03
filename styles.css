@@ -92,6 +92,25 @@ body {
   align-items: center;
 }
 
+.model-field[hidden] {
+  display: none;
+}
+
+.model-field {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.model-controls select {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 8px;
+  font: inherit;
+  font-size: 0.86rem;
+  background: #fff;
+}
+
 button {
   border: 1px solid var(--accent);
   background: var(--accent);
@@ -118,6 +137,33 @@ button:disabled {
   font-size: 0.85rem;
   color: var(--muted);
   border-bottom: 1px solid var(--line);
+}
+
+.model-load {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  display: grid;
+  gap: 6px;
+}
+
+.model-load-bar {
+  height: 8px;
+  background: #e4e9e1;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.model-load-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #1f7a5a, #4f9f7b);
+  transition: width 0.2s ease;
+}
+
+.model-load-text {
+  font-size: 0.84rem;
+  color: var(--muted);
 }
 
 .thinking {

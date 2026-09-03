@@ -4,9 +4,12 @@ Small browser demo:
 
 - LiveCodes on the left
 - Chat agent on the right
-- Chrome built-in AI only
+- Two provider options:
+	- Chrome built-in AI (Prompt API)
+	- Transformers.js with Gemma 4 E2B (WebGPU-capable ONNX)
 
 The agent can read and update HTML/CSS/JS in the playground.
+This project is prompt-only text generation. No webcam or multimodal input is required.
 
 ## Run
 
@@ -26,3 +29,4 @@ Open http://localhost:5173 in Chrome.
 
 - Chrome built-in AI depends on your Chrome/device support.
 - If the Prompt API is unavailable, Chrome or your profile/device may not have the built-in model enabled.
+- Transformers.js model loading is browser-side and can take time on first run.
